@@ -4,6 +4,7 @@
 2018-04-10 18:36
 """
 
+import os
 import time
 import json
 import logging
@@ -13,6 +14,8 @@ from digi.xbee.exception import TimeoutException
 
 
 PORT = '/dev/ttyUSB0'
+
+PRIORITY_FILE = 'priority.txt'
 
 DATA_FORMAT = {
     'sequence': ('temperature', 'humidity', 'soil_moisture', 'light'),
@@ -25,16 +28,25 @@ DATA_FORMAT = {
 THRESHOLDS = {
     '0013A200410809DD': {
         'soil_moisture': 800.0,
-        'light': 130.0
+        'light_up': 300.0,
+        'light_down': 50.0
     },
     '0013A200410809E3': {
         'soil_moisture': 800.0,
-        'light': 130.0
+        'light_up': 300.0,
+        'light_down': 50.0
     },
     '0013A200410809D8': {
         'soil_moisture': 800.0,
-        'light': 130.0
+        'light_up': 300.0,
+        'light_down': 50.0
     }
+}
+
+PLANTS = {
+    '1': '0013A200410809DD',
+    '2': '0013A200410809E3',
+    '3': '0013A200410809D8'
 }
 
 PUMP_STATUS = {'0013A200410809DD': False, '0013A200410809E3': False, '0013A200410809D8': False}
@@ -64,12 +76,12 @@ def write_to_json(address, data):
     """
     Write data to json file.
     ------------------------
-    `address`: The remote device address.
+    `address`: The remote devidebugce address.
     `data`: dict
     """
 
     logger = logging.getLogger(__name__)
-    logger.debug("Data to be writen: %s", data)
+    logger.info("Data to be writen: %s", data)
 
     json_data = None
 
@@ -98,7 +110,7 @@ def main():
     ----------------------------------------------------------
     """
 
-    setup_logger()
+    setup_logger(level=logging.INFO)
 
     device = XBeeDevice(port=PORT, baud_rate=9600)
     device.open()
@@ -106,6 +118,9 @@ def main():
     logger = logging.getLogger(__name__)
 
     light_on = False
+
+    light_system = RemoteXBeeDevice(device, XBee64BitAddress.from_hex_string(LIGHT_ADDRESS))
+    irrigation_system = RemoteXBeeDevice(device, XBee64BitAddress.from_hex_string(IRRIGATION_ADDRESS))
 
     while True:
 
@@ -118,7 +133,7 @@ def main():
             address = message['Sender: ']
             data = message['Data: ']
 
-            logger.debug("Address: %s", address)
+            logger.info("Address: %s", address)
             logger.debug("Data: %s", data)
 
             sensor_data = {}
@@ -133,19 +148,18 @@ def main():
             write_to_json(address, sensor_data)
 
             # ligth
-            light_system = RemoteXBeeDevice(device, XBee64BitAddress.from_hex_string(LIGHT_ADDRESS))
             light_message = bytearray.fromhex(address)
 
-            if sensor_data['light'] < THRESHOLDS[address]['light'] and not LIGHT_STATUS[address]:
+            if sensor_data['light'] < THRESHOLDS[address]['light_down'] and not LIGHT_STATUS[address]:
                 light_message.append(1)
                 LIGHT_STATUS[address] = True
-                logger.debug('Light will turn on.')
+                logger.info('Light will turn on.')
                 device.send_data_async(light_system, light_message)
 
-            if sensor_data['light'] >= THRESHOLDS[address]['light'] and LIGHT_STATUS[address]:
+            if sensor_data['light'] > THRESHOLDS[address]['light_up'] and LIGHT_STATUS[address]:
                 light_message.append(0)
                 LIGHT_STATUS[address] = False
-                logger.debug('Light will turn off.')
+                logger.info('Light will turn off.')
                 device.send_data_async(light_system, light_message)
 
             # if True in LIGHT_STATUS.values() and not light_on:
@@ -160,20 +174,45 @@ def main():
             #     device.send_data_async(light_system, light_message)
 
             # pump
-            irrigation_system = RemoteXBeeDevice(device, XBee64BitAddress.from_hex_string(IRRIGATION_ADDRESS))
             irrigation_message = bytearray.fromhex(address)
 
             if sensor_data['soil_moisture'] > THRESHOLDS[address]['soil_moisture'] and not PUMP_STATUS[address]:
                 irrigation_message.append(1)
                 PUMP_STATUS[address] = True
-                logger.debug('Pump will turn on.')
+                logger.info('Pump will turn on.')
                 device.send_data_async(irrigation_system, irrigation_message)
 
             if sensor_data['soil_moisture'] <= THRESHOLDS[address]['soil_moisture'] and PUMP_STATUS[address]:
                 irrigation_message.append(0)
                 PUMP_STATUS[address] = False
-                logger.debug('Pump will turn off.')
+                logger.info('Pump will turn off.')
                 device.send_data_async(irrigation_system, irrigation_message)
+
+        #
+        # App message
+        #
+        try:
+            with open(PRIORITY_FILE, mode='r+') as f:
+                m = list(f.read())
+                if len(m) == 3:
+                    f.truncate(0)
+                    logger.info("App: %s", m)
+
+                    priority_message = bytearray.fromhex(PLANTS[m[0]])
+                    priority_message.append(int(m[2]))
+
+                    if m[1] == 0:
+                        # irrigation
+                        device.send_data_async(irrigation_system, priority_message)
+                    elif m[1] == 1:
+                        # light
+                        device.send_data_async(light_system, priority_message)
+                else:
+                    f.truncate(0)
+                    logger.warning("App message error! (%s)", m)
+
+        except FileNotFoundError:
+            pass
 
     device.close()
 
